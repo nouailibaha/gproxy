@@ -6,11 +6,16 @@ import (
 	"net"
 
 	"github.com/gproxy/internal/tcpsplice"
+	"github.com/gproxy/internal/userspace"
 )
 
+type TransportName string
+
 const (
-	PROXY_ADDR  = ":4000"
-	SERVER_ADDR = ":5000"
+	PROXY_ADDR                = ":4000"
+	SERVER_ADDR               = ":5000"
+	TCPSplice   TransportName = "tcpSplice"
+	Userland    TransportName = "userspace"
 )
 
 func main() {
@@ -43,10 +48,19 @@ func handleConn(conn net.Conn) {
 	defer serverConn.Close()
 
 	// serverConn -> conn
-	go tcpsplice.Transport(serverConn, conn)
-	// go userspace.Transport(serverConn, conn)
+	go getTransport(TCPSplice)(serverConn, conn)
 
 	// conn -> serverConn
-	tcpsplice.Transport(conn, serverConn)
-	// userspace.Transport(conn, serverConn)
+	getTransport(TCPSplice)(conn, serverConn)
+}
+
+func getTransport(name TransportName) func(src, dst net.Conn) {
+	switch name {
+	case TCPSplice:
+		return tcpsplice.Transport
+	case Userland:
+		return userspace.Transport
+	default:
+		return userspace.Transport
+	}
 }
