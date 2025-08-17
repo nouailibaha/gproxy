@@ -73,14 +73,32 @@ func createAndRegisterEpollEvent(srcfd int) int {
 func splice(srcfd int, dstfd int) (int, error) {
 	n, err := unix.Splice(srcfd, nil, dstfd, nil, PIPE_BUFF_TRANSFER_SIZE, unix.SPLICE_F_MOVE)
 	if err != nil {
-		if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed) {
+		if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EPIPE) {
 			fmt.Println("Connection closed, exiting", err)
 
-			return 0, nil
+			return 0, io.EOF
+		}
+
+		if errors.Is(err, syscall.EAGAIN) {
+			ev := unix.EpollEvent{
+				Events: unix.EPOLLOUT,
+				Fd:     int32(dstfd),
+			}
+			epfd, _ := unix.EpollCreate1(0)
+			defer unix.Close(epfd)
+
+			unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, dstfd, &ev)
+			_, _ = unix.EpollWait(epfd, make([]unix.EpollEvent, 1), -1)
+
+			return splice(srcfd, dstfd)
 		}
 
 		fmt.Println("Cant write to the dstfd from srcfd", err)
-		return 0, nil
+		return 0, err
+	}
+
+	if n == 0 {
+		return 0, io.EOF
 	}
 
 	return int(n), nil
@@ -135,11 +153,7 @@ func Transport(src, dst net.Conn) {
 				continue
 			} else {
 				n, err := splice(srcfd, int(w.Fd()))
-				if err != nil {
-					continue
-				}
-
-				if n == 0 {
+				if err == io.EOF {
 					unix.EpollCtl(epfd, unix.EPOLL_CTL_DEL, int(ev.Fd), nil)
 					unix.Close(int(ev.Fd))
 
@@ -148,6 +162,9 @@ func Transport(src, dst net.Conn) {
 					continue
 				}
 
+				if err != nil {
+					continue
+				}
 				fmt.Println("written bytes -> from src -> pipe:w", n)
 
 				if err := drainPipeToDst(r, dstfd, int(n), epfd); err != nil {
@@ -164,30 +181,20 @@ func Transport(src, dst net.Conn) {
 }
 
 func drainPipeToDst(r *os.File, dstfd int, writtenBytes int, epfd int) error {
-	s, err := unix.Splice(int(r.Fd()), nil, dstfd, nil, writtenBytes, unix.SPLICE_F_MOVE)
-
+	s, err := splice(int(r.Fd()), dstfd)
 	if err != nil {
-		if errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed) {
-			fmt.Println("Connection closed, exiting", err)
-			return io.EOF
-		}
-
-		if errors.Is(err, syscall.EAGAIN) {
-			return nil
-		}
-
-		fmt.Println("Cant write to the dstfd from the reader pipe", err)
-		return nil
+		return err
 	}
+
 	fmt.Println("written bytes -> from pipe:r -> dst", s)
 
-	if s < int64(writtenBytes) {
-		log.Printf("Not all bytes written to dst, expected %d, got %d\n", writtenBytes, s)
-
+	if s < writtenBytes {
 		remaining := writtenBytes - int(s)
 
+		log.Printf("Not all bytes written to dst, expected %d, got %d, remaining %d\n", writtenBytes, s, remaining)
+
 		for remaining > 0 {
-			m, err := unix.Splice(int(r.Fd()), nil, dstfd, nil, remaining, unix.SPLICE_F_MOVE)
+			m, err := splice(int(r.Fd()), dstfd)
 
 			if m > 0 {
 				fmt.Println("drained bytes -> from pipe:r -> dst", m)
@@ -195,33 +202,11 @@ func drainPipeToDst(r *os.File, dstfd int, writtenBytes int, epfd int) error {
 			}
 
 			if err != nil {
-				if errors.Is(err, syscall.EAGAIN) {
-					ev := unix.EpollEvent{
-						Events: unix.EPOLLOUT,
-						Fd:     int32(dstfd),
-					}
-					epfd, _ := unix.EpollCreate1(0)
-					defer unix.Close(epfd)
-
-					unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, dstfd, &ev)
-					_, _ = unix.EpollWait(epfd, make([]unix.EpollEvent, 1), -1)
-
-					continue
-				}
-
-				if errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed) {
-					unix.EpollCtl(epfd, unix.EPOLL_CTL_DEL, dstfd, nil)
-					unix.Close(dstfd)
-
-					return io.EOF
-				}
-
 				return err
 			}
 
 			if m == 0 {
 				fmt.Println("Empty pipe..")
-
 				return nil
 			}
 		}
