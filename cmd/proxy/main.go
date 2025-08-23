@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 
+	"github.com/gproxy/internal/sockmap"
 	"github.com/gproxy/internal/tcpsplice"
 	"github.com/gproxy/internal/userspace"
 )
@@ -12,10 +13,12 @@ import (
 type TransportName string
 
 const (
-	PROXY_ADDR                = ":4000"
-	SERVER_ADDR               = ":5000"
-	TCPSplice   TransportName = "tcpSplice"
-	Userland    TransportName = "userspace"
+	PROXY_ADDR  = ":4000"
+	SERVER_ADDR = ":5000"
+
+	TCPSplice TransportName = "tcpSplice"
+	Userland  TransportName = "userspace"
+	Sockmap   TransportName = "sockmap"
 )
 
 func main() {
@@ -48,10 +51,10 @@ func handleConn(conn net.Conn) {
 	defer serverConn.Close()
 
 	// serverConn -> conn
-	go getTransport(TCPSplice)(serverConn, conn)
+	go getTransport(Sockmap)(serverConn, conn)
 
 	// conn -> serverConn
-	getTransport(TCPSplice)(conn, serverConn)
+	getTransport(Sockmap)(conn, serverConn)
 }
 
 func getTransport(name TransportName) func(src, dst net.Conn) {
@@ -60,6 +63,8 @@ func getTransport(name TransportName) func(src, dst net.Conn) {
 		return tcpsplice.Transport
 	case Userland:
 		return userspace.Transport
+	case Sockmap:
+		return sockmap.Transport
 	default:
 		return userspace.Transport
 	}
